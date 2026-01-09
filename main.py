@@ -44,6 +44,19 @@ ITEMS_PER_PAGE = 5
 previous_status_type = None
 previous_last_online = None
 
+# Статус бота для /heartbeat
+bot_status = {
+    "started_at": datetime.now(),
+    "last_check": None,
+    "total_checks": 0,
+    "total_alerts": 0,
+    "last_error": None,
+    "last_reconnect": None,
+    "flood_waits": 0,
+    "reconnects": 0,
+    "is_connected": False
+}
+
 bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 dp = Dispatcher()
 
@@ -219,13 +232,16 @@ def print_log(message, is_alert=False):
         print(f"[{timestamp}] {message}")
 
 
-async def send_bot_notification(message: str):
+async def send_bot_notification(message: str, is_alert: bool = False):
     """Отправляет уведомление через Telegram бота."""
+    global bot_status
     if not bot or not CHAT_ID:
         return
     
     try:
         await bot.send_message(chat_id=int(CHAT_ID), text=message, parse_mode=ParseMode.HTML)
+        if is_alert:
+            bot_status["total_alerts"] += 1
     except Exception as e:
         print_log(f"⚠️ Ошибка отправки в бота: {e}")
 
@@ -248,7 +264,8 @@ async def cmd_start(message: types.Message):
         f"✅ Chat ID сохранен: <code>{CHAT_ID}</code>\n\n"
         f"Команды:\n"
         f"/history — История активности\n"
-        f"/stats — Статистика за сегодня\n\n"
+        f"/stats — Статистика за сегодня\n"
+        f"/heartbeat — Состояние бота\n\n"
         f"🔔 Уведомления приходят автоматически",
         parse_mode=ParseMode.HTML
     )
@@ -269,6 +286,37 @@ async def cmd_stats(message: types.Message):
     """Обработчик команды /stats."""
     stats = get_today_stats()
     text = format_stats_message(stats)
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("heartbeat"))
+async def cmd_heartbeat(message: types.Message):
+    """Обработчик команды /heartbeat — проверка состояния бота."""
+    uptime = datetime.now() - bot_status["started_at"]
+    hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    status_emoji = "🟢" if bot_status["is_connected"] else "🔴"
+    
+    text = (
+        f"💓 <b>Heartbeat — Состояние бота</b>\n\n"
+        f"{status_emoji} Статус: <b>{'Работает' if bot_status['is_connected'] else 'Отключен'}</b>\n"
+        f"⏱ Аптайм: <b>{hours}ч {minutes}м {seconds}с</b>\n"
+        f"📊 Проверок: <b>{bot_status['total_checks']}</b>\n"
+        f"🔔 Алертов: <b>{bot_status['total_alerts']}</b>\n"
+        f"⚠️ FloodWait: <b>{bot_status['flood_waits']}</b>\n"
+        f"🔄 Реконнектов: <b>{bot_status['reconnects']}</b>\n"
+    )
+    
+    if bot_status["last_check"]:
+        text += f"\n🕐 Последняя проверка: <code>{bot_status['last_check'].strftime('%H:%M:%S')}</code>"
+    
+    if bot_status["last_error"]:
+        text += f"\n\n❌ <b>Последняя ошибка:</b>\n<code>{bot_status['last_error'][:200]}</code>"
+    
+    if bot_status["last_reconnect"]:
+        text += f"\n\n🔄 Последний реконнект: <code>{bot_status['last_reconnect'].strftime('%d.%m %H:%M:%S')}</code>"
+    
     await message.answer(text, parse_mode=ParseMode.HTML)
 
 
@@ -345,7 +393,7 @@ async def check_status(client, user_id: int):
                 print_log(f"Статус ID:{TARGET_USER_ID}: {status_text}")
             
             if alert_message:
-                await send_bot_notification(alert_message)
+                await send_bot_notification(alert_message, is_alert=True)
         else:
             print_log(f"Начальный статус ID:{TARGET_USER_ID}: {status_text}")
         
@@ -364,43 +412,64 @@ async def check_status(client, user_id: int):
 
 async def monitoring_loop(client, contact_id: int):
     """Цикл мониторинга статуса с автопереподключением (24/7)."""
+    global bot_status
     reconnect_delay = 5
     max_reconnect_delay = 300  # макс 5 минут между попытками
     
     while True:
         try:
             if not client.is_connected():
+                bot_status["is_connected"] = False
                 print_log("🔄 Переподключение к Telegram...")
                 await client.connect()
                 if not await client.is_user_authorized():
-                    print_log("❌ Сессия недействительна. Ожидание 60 сек и повтор...")
+                    error_msg = "Сессия недействительна"
+                    print_log(f"❌ {error_msg}. Ожидание 60 сек и повтор...")
+                    bot_status["last_error"] = error_msg
+                    await send_bot_notification(f"❌ <b>Ошибка:</b> {error_msg}. Повтор через 60 сек...")
                     await asyncio.sleep(60)
                     continue
                 print_log("✅ Переподключение успешно!")
-                reconnect_delay = 5  # сброс задержки при успехе
+                bot_status["is_connected"] = True
+                bot_status["reconnects"] += 1
+                bot_status["last_reconnect"] = datetime.now()
+                await send_bot_notification("✅ <b>Переподключение успешно!</b> Мониторинг продолжается.")
+                reconnect_delay = 5
             
+            bot_status["is_connected"] = True
             await check_status(client, contact_id)
-            reconnect_delay = 5  # сброс при успешной проверке
+            bot_status["total_checks"] += 1
+            bot_status["last_check"] = datetime.now()
+            reconnect_delay = 5
             
         except FloodWaitError as e:
+            bot_status["flood_waits"] += 1
             print_log(f"⚠️ Flood wait: ждем {e.seconds} секунд...")
+            await send_bot_notification(f"⚠️ <b>FloodWait:</b> ждем {e.seconds} секунд...")
             await asyncio.sleep(e.seconds)
             continue
             
         except (ConnectionError, OSError) as e:
+            bot_status["is_connected"] = False
+            bot_status["last_error"] = str(e)
             print_log(f"⚠️ Потеря соединения: {e}. Повтор через {reconnect_delay} сек...")
+            await send_bot_notification(f"⚠️ <b>Потеря соединения.</b> Повтор через {reconnect_delay} сек...")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
             continue
             
         except Exception as e:
-            error_msg = str(e).lower()
-            if "disconnected" in error_msg or "connection" in error_msg:
+            error_msg = str(e)
+            if "disconnected" in error_msg.lower() or "connection" in error_msg.lower():
+                bot_status["is_connected"] = False
+                bot_status["last_error"] = error_msg
                 print_log(f"⚠️ Отключение: {e}. Повтор через {reconnect_delay} сек...")
+                await send_bot_notification(f"⚠️ <b>Отключение.</b> Повтор через {reconnect_delay} сек...")
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
                 continue
             else:
+                bot_status["last_error"] = error_msg
                 print_log(f"❌ Неожиданная ошибка: {e}. Продолжаем...")
         
         await asyncio.sleep(CHECK_INTERVAL)
