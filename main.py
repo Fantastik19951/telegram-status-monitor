@@ -352,17 +352,20 @@ async def check_status(client, user_id: int):
         previous_status_type = current_status_type
         previous_last_online = current_last_online
         
-    except FloodWaitError as e:
-        print_log(f"⚠️ Flood wait: ждем {e.seconds} секунд...")
-        await asyncio.sleep(e.seconds)
+    except FloodWaitError:
+        raise  # передаем в monitoring_loop для обработки
+    except (ConnectionError, OSError):
+        raise  # передаем в monitoring_loop для реконнекта
     except Exception as e:
+        if "disconnected" in str(e).lower() or "connection" in str(e).lower():
+            raise  # передаем в monitoring_loop
         print_log(f"❌ Ошибка при проверке статуса: {e}")
 
 
 async def monitoring_loop(client, contact_id: int):
-    """Цикл мониторинга статуса с автопереподключением."""
-    reconnect_attempts = 0
-    max_reconnect_attempts = 10
+    """Цикл мониторинга статуса с автопереподключением (24/7)."""
+    reconnect_delay = 5
+    max_reconnect_delay = 300  # макс 5 минут между попытками
     
     while True:
         try:
@@ -370,31 +373,35 @@ async def monitoring_loop(client, contact_id: int):
                 print_log("🔄 Переподключение к Telegram...")
                 await client.connect()
                 if not await client.is_user_authorized():
-                    print_log("❌ Сессия недействительна. Перезапустите с новой SESSION_STRING.")
-                    return
+                    print_log("❌ Сессия недействительна. Ожидание 60 сек и повтор...")
+                    await asyncio.sleep(60)
+                    continue
                 print_log("✅ Переподключение успешно!")
-                reconnect_attempts = 0
+                reconnect_delay = 5  # сброс задержки при успехе
             
             await check_status(client, contact_id)
-            reconnect_attempts = 0
+            reconnect_delay = 5  # сброс при успешной проверке
             
-        except ConnectionError as e:
-            reconnect_attempts += 1
-            if reconnect_attempts >= max_reconnect_attempts:
-                print_log(f"❌ Не удалось переподключиться после {max_reconnect_attempts} попыток")
-                return
-            print_log(f"⚠️ Потеря соединения, попытка {reconnect_attempts}/{max_reconnect_attempts}...")
-            await asyncio.sleep(5)
+        except FloodWaitError as e:
+            print_log(f"⚠️ Flood wait: ждем {e.seconds} секунд...")
+            await asyncio.sleep(e.seconds)
             continue
+            
+        except (ConnectionError, OSError) as e:
+            print_log(f"⚠️ Потеря соединения: {e}. Повтор через {reconnect_delay} сек...")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+            continue
+            
         except Exception as e:
-            if "disconnected" in str(e).lower():
-                reconnect_attempts += 1
-                if reconnect_attempts >= max_reconnect_attempts:
-                    print_log(f"❌ Не удалось переподключиться после {max_reconnect_attempts} попыток")
-                    return
-                print_log(f"⚠️ Отключение, попытка переподключения {reconnect_attempts}/{max_reconnect_attempts}...")
-                await asyncio.sleep(5)
+            error_msg = str(e).lower()
+            if "disconnected" in error_msg or "connection" in error_msg:
+                print_log(f"⚠️ Отключение: {e}. Повтор через {reconnect_delay} сек...")
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
                 continue
+            else:
+                print_log(f"❌ Неожиданная ошибка: {e}. Продолжаем...")
         
         await asyncio.sleep(CHECK_INTERVAL)
 
