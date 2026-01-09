@@ -360,9 +360,42 @@ async def check_status(client, user_id: int):
 
 
 async def monitoring_loop(client, contact_id: int):
-    """Цикл мониторинга статуса."""
+    """Цикл мониторинга статуса с автопереподключением."""
+    reconnect_attempts = 0
+    max_reconnect_attempts = 10
+    
     while True:
-        await check_status(client, contact_id)
+        try:
+            if not client.is_connected():
+                print_log("🔄 Переподключение к Telegram...")
+                await client.connect()
+                if not await client.is_user_authorized():
+                    print_log("❌ Сессия недействительна. Перезапустите с новой SESSION_STRING.")
+                    return
+                print_log("✅ Переподключение успешно!")
+                reconnect_attempts = 0
+            
+            await check_status(client, contact_id)
+            reconnect_attempts = 0
+            
+        except ConnectionError as e:
+            reconnect_attempts += 1
+            if reconnect_attempts >= max_reconnect_attempts:
+                print_log(f"❌ Не удалось переподключиться после {max_reconnect_attempts} попыток")
+                return
+            print_log(f"⚠️ Потеря соединения, попытка {reconnect_attempts}/{max_reconnect_attempts}...")
+            await asyncio.sleep(5)
+            continue
+        except Exception as e:
+            if "disconnected" in str(e).lower():
+                reconnect_attempts += 1
+                if reconnect_attempts >= max_reconnect_attempts:
+                    print_log(f"❌ Не удалось переподключиться после {max_reconnect_attempts} попыток")
+                    return
+                print_log(f"⚠️ Отключение, попытка переподключения {reconnect_attempts}/{max_reconnect_attempts}...")
+                await asyncio.sleep(5)
+                continue
+        
         await asyncio.sleep(CHECK_INTERVAL)
 
 
