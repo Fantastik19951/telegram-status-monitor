@@ -250,18 +250,22 @@ async def send_bot_notification(message: str, is_alert: bool = False):
 async def cmd_start(message: types.Message):
     """Обработчик команды /start."""
     global CHAT_ID
-    CHAT_ID = str(message.chat.id)
+    new_chat_id = str(message.chat.id)
     
-    with open(".env", "r") as f:
-        env_content = f.read()
+    # Проверяем, совпадает ли CHAT_ID
+    if CHAT_ID and CHAT_ID == new_chat_id:
+        status_msg = "✅ Chat ID уже настроен"
+    elif CHAT_ID and CHAT_ID != new_chat_id:
+        status_msg = f"⚠️ <b>ВНИМАНИЕ:</b> Текущий CHAT_ID в настройках: <code>{CHAT_ID}</code>\n\nВаш Chat ID: <code>{new_chat_id}</code>\n\n<b>Обновите CHAT_ID в Railway Variables!</b>"
+    else:
+        status_msg = f"⚠️ CHAT_ID не настроен!\n\nВаш Chat ID: <code>{new_chat_id}</code>\n\n<b>Добавьте CHAT_ID в Railway Variables!</b>"
     
-    if "CHAT_ID=" not in env_content:
-        with open(".env", "a") as f:
-            f.write(f"\nCHAT_ID={CHAT_ID}")
+    # Обновляем в памяти для текущей сессии
+    CHAT_ID = new_chat_id
     
     await message.answer(
         f"👋 <b>Мониторинг активности</b>\n\n"
-        f"✅ Chat ID сохранен: <code>{CHAT_ID}</code>\n\n"
+        f"{status_msg}\n\n"
         f"Команды:\n"
         f"/history — История активности\n"
         f"/stats — Статистика за сегодня\n"
